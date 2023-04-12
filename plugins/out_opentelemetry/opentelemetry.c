@@ -25,6 +25,7 @@
 #include <fluent-bit/flb_pack.h>
 
 #include <cfl/cfl.h>
+#include <jansson.h>
 #include <fluent-otel-proto/fluent-otel.h>
 
 #include <cmetrics/cmetrics.h>
@@ -718,6 +719,16 @@ static int flush_to_otel(struct opentelemetry_context *ctx,
     void *body;
     unsigned len;
     int res;
+	/* json_t *root; */
+	/* json_error_t error; */
+	/* root = json_loads("{\"a\": }", 0, &error); */
+	/* if (!root) { */
+	/* 	printf("error: on line %d: %s\n", error.line, error.text); */
+	/* } */
+	/* if (json_is_object(root)) { */
+	/* 	printf("is object\n"); */
+
+	/* } */
 
     opentelemetry__proto__collector__logs__v1__export_logs_service_request__init(&export_logs);
     opentelemetry__proto__logs__v1__resource_logs__init(&resource_log);
@@ -861,6 +872,15 @@ static int process_logs(struct flb_event_chunk *event_chunk,
         if (obj->type != MSGPACK_OBJECT_MAP) {
             continue;
         }
+
+		for (int i=0; i < obj->via.map.size; i++) {
+			msgpack_object_kv kv = obj->via.map.ptr[i];
+			flb_info("key%d: %s %d\n", i, kv.key.via.str.ptr, kv.key.via.str.size);
+			flb_info("value%d type: %d\n", i, kv.val.type);
+			if (kv.val.type == MSGPACK_OBJECT_STR) {
+				flb_info("value%d: %s %d\n", i, kv.val.via.str.ptr, kv.val.via.str.size);
+			}
+		}
 
         log_object = msgpack_object_to_otlp_any_value(obj);
 
