@@ -39,6 +39,7 @@
 #include <fluent-bit/flb_hash_table.h>
 #include <fluent-bit/flb_scheduler.h>
 #include <fluent-bit/flb_ring_buffer.h>
+#include <fluent-bit/flb_processor.h>
 
 /* input plugin macro helpers */
 #include <fluent-bit/flb_input_plugin.h>
@@ -48,6 +49,7 @@
 #endif /* FLB_HAVE_CHUNK_TRACE */
 
 struct flb_libco_in_params libco_in_param;
+pthread_key_t libco_in_param_key;
 
 #define protcmp(a, b)  strncasecmp(a, b, strlen(a))
 
@@ -336,6 +338,9 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         instance->mem_chunks_size = 0;
         instance->storage_buf_status = FLB_INPUT_RUNNING;
         mk_list_add(&instance->_head, &config->inputs);
+
+        /* processor instance */
+        instance->processor = flb_processor_create(config, instance->name, instance);
     }
 
     return instance;
@@ -781,8 +786,15 @@ void flb_input_instance_destroy(struct flb_input_instance *ins)
 
     mk_list_del(&ins->_head);
 
+    /* ring buffer */
     if (ins->rb) {
+        flb_input_chunk_ring_buffer_cleanup(ins);
         flb_ring_buffer_destroy(ins->rb);
+    }
+
+    /* processor */
+    if (ins->processor) {
+        flb_processor_destroy(ins->processor);
     }
     flb_free(ins);
 }
@@ -835,12 +847,79 @@ static int input_instance_channel_events_init(struct flb_input_instance *ins)
     return 0;
 }
 
+int flb_input_net_property_check(struct flb_input_instance *ins,
+                                 struct flb_config *config)
+{
+    int ret = 0;
+
+    /* Get Downstream net_setup configmap */
+    ins->net_config_map = flb_downstream_get_config_map(config);
+    if (!ins->net_config_map) {
+        flb_input_instance_destroy(ins);
+        return -1;
+    }
+
+    /*
+     * Validate 'net.*' properties: if the plugin use the Downstream interface,
+     * it might receive some networking settings.
+     */
+    if (mk_list_size(&ins->net_properties) > 0) {
+        ret = flb_config_map_properties_check(ins->p->name,
+                                              &ins->net_properties,
+                                              ins->net_config_map);
+        if (ret == -1) {
+            if (config->program_name) {
+                flb_helper("try the command: %s -i %s -h\n",
+                           config->program_name, ins->p->name);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int flb_input_plugin_property_check(struct flb_input_instance *ins,
+                                    struct flb_config *config)
+{
+    int ret = 0;
+    struct mk_list *config_map;
+    struct flb_input_plugin *p = ins->p;
+
+    if (p->config_map) {
+        /*
+         * Create a dynamic version of the configmap that will be used by the specific
+         * instance in question.
+         */
+        config_map = flb_config_map_create(config, p->config_map);
+        if (!config_map) {
+            flb_error("[input] error loading config map for '%s' plugin",
+                      p->name);
+            flb_input_instance_destroy(ins);
+            return -1;
+        }
+        ins->config_map = config_map;
+
+        /* Validate incoming properties against config map */
+        ret = flb_config_map_properties_check(ins->p->name,
+                                              &ins->properties, ins->config_map);
+        if (ret == -1) {
+            if (config->program_name) {
+                flb_helper("try the command: %s -i %s -h\n",
+                           config->program_name, ins->p->name);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int flb_input_instance_init(struct flb_input_instance *ins,
                             struct flb_config *config)
 {
     int ret;
     struct flb_config *ctx = ins->config;
-    struct mk_list *config_map;
     struct flb_input_plugin *p = ins->p;
     int tls_session_mode;
 
@@ -988,31 +1067,8 @@ int flb_input_instance_init(struct flb_input_instance *ins,
      * Before to call the initialization callback, make sure that the received
      * configuration parameters are valid if the plugin is registering a config map.
      */
-    if (p->config_map) {
-        /*
-         * Create a dynamic version of the configmap that will be used by the specific
-         * instance in question.
-         */
-        config_map = flb_config_map_create(config, p->config_map);
-        if (!config_map) {
-            flb_error("[input] error loading config map for '%s' plugin",
-                      p->name);
-            flb_input_instance_destroy(ins);
-            return -1;
-        }
-        ins->config_map = config_map;
-
-        /* Validate incoming properties against config map */
-        ret = flb_config_map_properties_check(ins->p->name,
-                                              &ins->properties, ins->config_map);
-        if (ret == -1) {
-            if (config->program_name) {
-                flb_helper("try the command: %s -i %s -h\n",
-                           config->program_name, ins->p->name);
-            }
-            flb_input_instance_destroy(ins);
-            return -1;
-        }
+    if (flb_input_plugin_property_check(ins, config) == -1) {
+        return -1;
     }
 
 #ifdef FLB_HAVE_TLS
@@ -1023,16 +1079,12 @@ int flb_input_instance_init(struct flb_input_instance *ins,
                           "(certificate file missing)",
                           ins->name);
 
-                flb_input_instance_destroy(ins);
-
                 return -1;
             }
             else if (ins->tls_key_file == NULL) {
                 flb_error("[input %s] error initializing TLS context "
                           "(private key file missing)",
                           ins->name);
-
-                flb_input_instance_destroy(ins);
 
                 return -1;
             }
@@ -1057,8 +1109,6 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             flb_error("[input %s] error initializing TLS context",
                       ins->name);
 
-            flb_input_instance_destroy(ins);
-
             return -1;
         }
     }
@@ -1069,8 +1119,6 @@ int flb_input_instance_init(struct flb_input_instance *ins,
     ins->tls_config_map = flb_tls_get_config_map(config);
 
     if (ins->tls_config_map == NULL) {
-        flb_input_instance_destroy(ins);
-
         return -1;
     }
 
@@ -1087,29 +1135,8 @@ int flb_input_instance_init(struct flb_input_instance *ins,
     /* Init network defaults */
     flb_net_setup_init(&ins->net_setup);
 
-    /* Get Downstream net_setup configmap */
-    ins->net_config_map = flb_downstream_get_config_map(config);
-    if (!ins->net_config_map) {
-        flb_input_instance_destroy(ins);
+    if (flb_input_net_property_check(ins, config) == -1) {
         return -1;
-    }
-
-    /*
-     * Validate 'net.*' properties: if the plugin use the Downstream interface,
-     * it might receive some networking settings.
-     */
-    if (mk_list_size(&ins->net_properties) > 0) {
-        ret = flb_config_map_properties_check(ins->p->name,
-                                              &ins->net_properties,
-                                              ins->net_config_map);
-        if (ret == -1) {
-            if (config->program_name) {
-                flb_helper("try the command: %s -i %s -h\n",
-                           config->program_name, ins->p->name);
-            }
-            flb_input_instance_destroy(ins);
-            return -1;
-        }
     }
 
     /* Initialize the input */
@@ -1131,7 +1158,6 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             if (ret != 0) {
                 flb_error("failed initialize input %s",
                           ins->name);
-                flb_input_instance_destroy(ins);
                 return -1;
             }
 
@@ -1140,7 +1166,6 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             if (ret != 0) {
                 flb_error("failed initialize channel events on input %s",
                           ins->name);
-                flb_input_instance_destroy(ins);
                 return -1;
             }
 
@@ -1149,7 +1174,6 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             if (ret) {
                 flb_error("failed while registering ring buffer events on input %s",
                           ins->name);
-                flb_input_instance_destroy(ins);
                 return -1;
             }
         }
@@ -1164,7 +1188,6 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             if (ret != 0) {
                 flb_error("failed initialize input %s",
                           ins->name);
-                flb_input_instance_destroy(ins);
                 return -1;
             }
         }
@@ -1216,7 +1239,7 @@ int flb_input_init_all(struct flb_config *config)
         /* Initialize instance */
         ret = flb_input_instance_init(ins, config);
         if (ret == -1) {
-            /* do nothing, it's ok if it fails */
+            flb_input_instance_destroy(ins);
             return -1;
         }
     }
