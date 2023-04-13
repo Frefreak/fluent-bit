@@ -914,6 +914,15 @@ static int process_logs(struct flb_event_chunk *event_chunk,
             msgpack_map_to_otlp_kvarray(event.metadata,
                                         &log_records[log_record_count].n_attributes);
 
+    flb_info("%d\n", event.body->via.map.size);
+    for (int i = 0; i < event.body->via.map.size; i++) {
+      struct msgpack_object_kv obj = event.body->via.map.ptr[0];
+      if (obj.key.type == MSGPACK_OBJECT_STR &&
+          obj.val.type == MSGPACK_OBJECT_STR) {
+        flb_info("%s %d, %s %d\n", obj.key.via.str.ptr, obj.key.via.str.size,
+                 obj.val.via.str.ptr, obj.val.via.str.size);
+      }
+    }
         log_object = msgpack_object_to_otlp_any_value(event.body);
 
         if (log_object == NULL) {
