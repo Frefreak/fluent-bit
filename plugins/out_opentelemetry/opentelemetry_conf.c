@@ -22,9 +22,92 @@
 #include <fluent-bit/flb_pack.h>
 #include <fluent-bit/flb_sds.h>
 #include <fluent-bit/flb_kv.h>
+#include <sys/stat.h>
 
+#include "msgpack/unpack.h"
 #include "opentelemetry.h"
 #include "opentelemetry_conf.h"
+
+
+static int read_label_map_spec(struct opentelemetry_context *ctx, flb_sds_t path)
+{
+    int ret;
+    struct stat st;
+    size_t file_size;
+    size_t ret_size;
+    FILE *fp;
+    char *buf = NULL;
+    char *msgpack_buf = NULL;
+    int root_type;
+    size_t off = 0;
+    msgpack_unpacked *result;
+
+    ret = access(path, R_OK);
+    if (ret < 0) {
+        flb_errno();
+        flb_plg_error(ctx->ins, "can't access %s", path);
+        return -1;
+    }
+    ret = stat(path, &st);
+    if (ret < 0) {
+        flb_errno();
+        flb_plg_error(ctx->ins, "stat failed %s", path);
+        return -1;
+    }
+    file_size = st.st_size;
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        flb_plg_error(ctx->ins, "can't open %s", path);
+        return -1;
+    }
+
+    buf = flb_malloc(file_size);
+    if (buf == NULL) {
+        flb_plg_error(ctx->ins, "malloc failed for file size %ld", file_size);
+        fclose(fp);
+        return -1;
+    }
+
+    ret_size = fread(buf, 1, file_size, fp);
+    if (ret_size < file_size && feof(fp) != 0) {
+        flb_plg_error(ctx->ins, "fread failed");
+        fclose(fp);
+        flb_free(buf);
+        return -1;
+    }
+    ret = flb_pack_json(buf, ret_size, &msgpack_buf, &ret_size, &root_type, NULL);
+    if (ret < 0) {
+        flb_plg_error(ctx->ins, "flb_pack_json failed");
+        fclose(fp);
+        flb_free(buf);
+        return -1;
+    }
+    fclose(fp);
+    flb_free(buf);
+
+    result = flb_malloc(sizeof(msgpack_unpacked));
+    if (result == NULL) {
+        flb_plg_error(ctx->ins, "malloc failed for msgpack_unpacked");
+        return -1;
+    }
+
+    msgpack_unpacked_init(result);
+    if (msgpack_unpack_next(result, msgpack_buf, ret_size, &off) == MSGPACK_UNPACK_SUCCESS) {
+        flb_plg_debug(ctx->ins, "msgpack unpack success");
+        if (result->data.type != MSGPACK_OBJECT_MAP) {
+            flb_plg_error(ctx->ins, "non map msgpack object detected");
+            return -1;
+        }
+
+        ctx->label_map_spec = &result->data;
+        ctx->label_map_result = result;
+        ctx->msgpack_buffer = msgpack_buf;
+    } else {
+        flb_plg_error(ctx->ins, "msgpack unpack failed");
+    }
+    return 0;
+}
 
 static int config_add_labels(struct flb_output_instance *ins,
                              struct opentelemetry_context *ctx)
@@ -34,6 +117,7 @@ static int config_add_labels(struct flb_output_instance *ins,
     struct flb_slist_entry *k = NULL;
     struct flb_slist_entry *v = NULL;
     struct flb_kv *kv;
+    int ret;
 
     if (!ctx->add_labels || mk_list_size(ctx->add_labels) == 0) {
         return 0;
@@ -53,6 +137,17 @@ static int config_add_labels(struct flb_output_instance *ins,
         kv = flb_kv_item_create(&ctx->kv_labels, k->str, v->str);
         if (!kv) {
             flb_plg_error(ins, "could not append label %s=%s\n", k->str, v->str);
+            return -1;
+        }
+    }
+
+    /* label map path */
+
+    ctx->label_map_spec = NULL;
+    if (ctx->label_map_path) {
+        flb_debug("reading label map spec from %s", ctx->label_map_path);
+        ret = read_label_map_spec(ctx, ctx->label_map_path);
+        if (ret < 0) {
             return -1;
         }
     }
@@ -252,6 +347,11 @@ void flb_opentelemetry_context_destroy(
     }
 
     flb_kv_release(&ctx->kv_labels);
+    if (ctx->label_map_spec) {
+        msgpack_unpacked_destroy(ctx->label_map_result);
+        flb_free(ctx->label_map_result);
+        flb_free(ctx->msgpack_buffer);
+    }
 
     if (ctx->u) {
         flb_upstream_destroy(ctx->u);

@@ -63,6 +63,15 @@ struct opentelemetry_context {
     /* internal labels ready to append */
     struct mk_list kv_labels;
 
+    /* label_map_path specifies the file used for creating dynamics label */
+    flb_sds_t label_map_path;
+
+    /* store label map struct in msgpack format */
+    msgpack_object *label_map_spec;
+    /* memory related buffers that needs to be freed */
+    msgpack_unpacked *label_map_result;
+    char *msgpack_buffer;
+
     /* Upstream connection to the backend server */
     struct flb_upstream *u;
 

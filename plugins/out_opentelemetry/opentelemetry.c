@@ -26,7 +26,6 @@
 #include <fluent-bit/flb_log_event_decoder.h>
 
 #include <cfl/cfl.h>
-#include <jansson.h>
 #include <fluent-otel-proto/fluent-otel.h>
 
 #include <cmetrics/cmetrics.h>
@@ -765,16 +764,6 @@ static int flush_to_otel(struct opentelemetry_context *ctx,
     void *body;
     unsigned len;
     int res;
-	/* json_t *root; */
-	/* json_error_t error; */
-	/* root = json_loads("{\"a\": }", 0, &error); */
-	/* if (!root) { */
-	/* 	printf("error: on line %d: %s\n", error.line, error.text); */
-	/* } */
-	/* if (json_is_object(root)) { */
-	/* 	printf("is object\n"); */
-
-	/* } */
 
     opentelemetry__proto__collector__logs__v1__export_logs_service_request__init(&export_logs);
     opentelemetry__proto__logs__v1__resource_logs__init(&resource_log);
@@ -848,6 +837,88 @@ static int flush_to_otel(struct opentelemetry_context *ctx,
     return res;
 }
 
+static void try_get_label_value(struct opentelemetry_context *ctx, msgpack_object_kv *kv, msgpack_object *body, struct mk_list *attributes_list) {
+    int i;
+    int kv_idx;
+    if (body->type != MSGPACK_OBJECT_MAP) {
+        return;
+    }
+    for (i = 0; i < body->via.map.size; i++) {
+        msgpack_object_kv body_kv = body->via.map.ptr[i];
+        if (strncmp(kv->key.via.str.ptr, body_kv.key.via.str.ptr, kv->key.via.str.size) == 0) {
+            // we are at the leaf node, do not need to descend anymore
+            if (kv->val.type == MSGPACK_OBJECT_STR) {
+                if (body_kv.val.type != MSGPACK_OBJECT_STR) {
+                    flb_plg_debug(ctx->ins, "body key type mismatch, expect STR, got %d", body_kv.val.type);
+                    return;
+                }
+                flb_kv_item_create_len(attributes_list,
+                        (char *)(kv->val.via.str.ptr), kv->val.via.str.size,
+                        (char *)(body_kv.val.via.str.ptr), body_kv.val.via.str.size);
+
+
+                /* flb_plg_debug(ctx->ins, "got label: \x1b[31;1m%s -> %s\x1b[0m", label_key, label_val); */
+            } else if (kv->val.type == MSGPACK_OBJECT_MAP) {
+                if (body_kv.val.type != MSGPACK_OBJECT_MAP) {
+                    flb_plg_debug(ctx->ins, "body key type mismatch, expect MAP, got %d", body_kv.val.type);
+                    return;
+                }
+                for (kv_idx = 0; kv_idx < kv->val.via.map.size; kv_idx++) {
+                    msgpack_object_kv sub_kv = kv->val.via.map.ptr[kv_idx];
+                    try_get_label_value(ctx, &sub_kv, &body_kv.val, attributes_list);
+                }
+            }
+        }
+    }
+}
+
+static void add_label_map_attributes(struct opentelemetry_context *ctx, msgpack_object *spec, msgpack_object *body,
+        Opentelemetry__Proto__Common__V1__KeyValue ***attributes, size_t *n_attributes)
+{
+    int i;
+    size_t final_size = *n_attributes;
+    size_t new_attributes_size;
+    struct mk_list attributes_list;
+    struct mk_list* head;
+    struct mk_list* tmp;
+    struct flb_kv *attr_kv;
+    Opentelemetry__Proto__Common__V1__KeyValue **new_attributes;
+    Opentelemetry__Proto__Common__V1__KeyValue *kv;
+
+    /* msgpack_object *label_value; */
+    if (spec->type != MSGPACK_OBJECT_MAP) {
+        return;
+    }
+    flb_kv_init(&attributes_list);
+    for (i = 0; i < spec->via.map.size; i++) {
+        try_get_label_value(ctx, &spec->via.map.ptr[i], body, &attributes_list);
+    }
+
+    flb_plg_debug(ctx->ins, "got %d new attrs", mk_list_size(&attributes_list));
+    new_attributes_size = mk_list_size(&attributes_list);
+    final_size += new_attributes_size;
+
+    new_attributes = flb_calloc(final_size, sizeof(Opentelemetry__Proto__Common__V1__KeyValue *));
+    for (i = 0; i < *n_attributes; i++) {
+        new_attributes[i] = *attributes[i];
+    }
+
+    i = *n_attributes;
+    mk_list_foreach_safe(head, tmp, &attributes_list) {
+        attr_kv = mk_list_entry(head, struct flb_kv, _head);
+        kv = otlp_kvpair_value_initialize();
+        kv->key = strdup(attr_kv->key);
+        kv->value = otlp_any_value_initialize(MSGPACK_OBJECT_STR, 0);
+        kv->value->string_value = strdup(attr_kv->val);
+        new_attributes[i] = kv;
+        i += 1;
+        flb_kv_item_destroy(attr_kv);
+    }
+    flb_free(*attributes);
+    *attributes = new_attributes;
+    *n_attributes = final_size;
+}
+
 static int process_logs(struct flb_event_chunk *event_chunk,
                         struct flb_output_flush *out_flush,
                         struct flb_input_instance *ins, void *out_context,
@@ -914,15 +985,9 @@ static int process_logs(struct flb_event_chunk *event_chunk,
             msgpack_map_to_otlp_kvarray(event.metadata,
                                         &log_records[log_record_count].n_attributes);
 
-    flb_info("%d\n", event.body->via.map.size);
-    for (int i = 0; i < event.body->via.map.size; i++) {
-      struct msgpack_object_kv obj = event.body->via.map.ptr[0];
-      if (obj.key.type == MSGPACK_OBJECT_STR &&
-          obj.val.type == MSGPACK_OBJECT_STR) {
-        flb_info("%s %d, %s %d\n", obj.key.via.str.ptr, obj.key.via.str.size,
-                 obj.val.via.str.ptr, obj.val.via.str.size);
-      }
-    }
+        if (ctx->label_map_spec) {
+            add_label_map_attributes(ctx, ctx->label_map_spec, event.body, &log_records[log_record_count].attributes, &log_records[log_record_count].n_attributes);
+        }
         log_object = msgpack_object_to_otlp_any_value(event.body);
 
         if (log_object == NULL) {
@@ -1202,7 +1267,11 @@ static struct flb_config_map config_map[] = {
                                              add_labels),
      "Adds a custom label to the metrics use format: 'add_label name value'"
     },
-
+    {
+     FLB_CONFIG_MAP_STR, "label_map_path", NULL,
+     0, FLB_TRUE, offsetof(struct opentelemetry_context, label_map_path),
+     "A label map file path used to specify how to generate dynamic labels"
+    },
     {
      FLB_CONFIG_MAP_STR, "proxy", NULL,
      0, FLB_FALSE, 0,

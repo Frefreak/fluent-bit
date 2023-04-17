@@ -3,4 +3,4 @@ set(src
   opentelemetry_conf.c
   )
 
-FLB_PLUGIN(out_opentelemetry "${src}" "jansson")
+FLB_PLUGIN(out_opentelemetry "${src}" "")
