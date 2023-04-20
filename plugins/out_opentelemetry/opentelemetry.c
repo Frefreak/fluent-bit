@@ -843,30 +843,29 @@ static void try_get_label_value(struct opentelemetry_context *ctx, msgpack_objec
     if (body->type != MSGPACK_OBJECT_MAP) {
         return;
     }
-    for (i = 0; i < body->via.map.size; i++) {
-        msgpack_object_kv body_kv = body->via.map.ptr[i];
-        if (kv->key.via.str.size == body_kv.key.via.str.size &&
-                strncmp(kv->key.via.str.ptr, body_kv.key.via.str.ptr, kv->key.via.str.size) == 0) {
-            // we are at the leaf node, do not need to descend anymore
-            if (kv->val.type == MSGPACK_OBJECT_STR) {
-                if (body_kv.val.type != MSGPACK_OBJECT_STR) {
-                    flb_plg_debug(ctx->ins, "body key type mismatch, expect STR, got %d", body_kv.val.type);
-                    return;
-                }
-                flb_kv_item_create_len(attributes_list,
-                        (char *)(kv->val.via.str.ptr), kv->val.via.str.size,
-                        (char *)(body_kv.val.via.str.ptr), body_kv.val.via.str.size);
-
-                /* flb_plg_debug(ctx->ins, "got label: \x1b[31;1m%s -> %s\x1b[0m", label_key, label_val); */
-            } else if (kv->val.type == MSGPACK_OBJECT_MAP) {
-                if (body_kv.val.type != MSGPACK_OBJECT_MAP) {
-                    flb_plg_debug(ctx->ins, "body key type mismatch, expect MAP, got %d", body_kv.val.type);
-                    return;
-                }
-                for (kv_idx = 0; kv_idx < kv->val.via.map.size; kv_idx++) {
-                    msgpack_object_kv sub_kv = kv->val.via.map.ptr[kv_idx];
-                    try_get_label_value(ctx, &sub_kv, &body_kv.val, attributes_list);
-                }
+    if (kv->val.type == MSGPACK_OBJECT_STR) {
+        for (i = 0; i < body->via.map.size; i++) {
+            msgpack_object_kv body_kv = body->via.map.ptr[i];
+            if (body_kv.val.type != MSGPACK_OBJECT_STR) {
+                continue;
+            }
+            if (kv->key.via.str.size == body_kv.key.via.str.size &&
+                    strncmp(kv->key.via.str.ptr, body_kv.key.via.str.ptr, kv->key.via.str.size) == 0) {
+                    flb_kv_item_create_len(attributes_list,
+                            (char *)(kv->val.via.str.ptr), kv->val.via.str.size,
+                            (char *)(body_kv.val.via.str.ptr), body_kv.val.via.str.size);
+                    break;
+            }
+        }
+    } else if (kv->val.type == MSGPACK_OBJECT_MAP) {
+        for (i = 0; i < body->via.map.size; i++) {
+            msgpack_object_kv body_kv = body->via.map.ptr[i];
+            if (body_kv.val.type != MSGPACK_OBJECT_MAP) {
+                continue;
+            }
+            for (kv_idx = 0; kv_idx < kv->val.via.map.size; kv_idx++) {
+                msgpack_object_kv sub_kv = kv->val.via.map.ptr[kv_idx];
+                try_get_label_value(ctx, &sub_kv, &body_kv.val, attributes_list);
             }
         }
     }
