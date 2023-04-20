@@ -856,7 +856,6 @@ static void try_get_label_value(struct opentelemetry_context *ctx, msgpack_objec
                         (char *)(kv->val.via.str.ptr), kv->val.via.str.size,
                         (char *)(body_kv.val.via.str.ptr), body_kv.val.via.str.size);
 
-
                 /* flb_plg_debug(ctx->ins, "got label: \x1b[31;1m%s -> %s\x1b[0m", label_key, label_val); */
             } else if (kv->val.type == MSGPACK_OBJECT_MAP) {
                 if (body_kv.val.type != MSGPACK_OBJECT_MAP) {

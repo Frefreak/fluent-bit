@@ -117,7 +117,6 @@ static int config_add_labels(struct flb_output_instance *ins,
     struct flb_slist_entry *k = NULL;
     struct flb_slist_entry *v = NULL;
     struct flb_kv *kv;
-    int ret;
 
     if (!ctx->add_labels || mk_list_size(ctx->add_labels) == 0) {
         return 0;
@@ -141,8 +140,12 @@ static int config_add_labels(struct flb_output_instance *ins,
         }
     }
 
-    /* label map path */
+    return 0;
+}
 
+static int config_label_map_path(struct opentelemetry_context *ctx)
+{
+    int ret;
     ctx->label_map_spec = NULL;
     if (ctx->label_map_path) {
         flb_debug("reading label map spec from %s", ctx->label_map_path);
@@ -151,7 +154,6 @@ static int config_add_labels(struct flb_output_instance *ins,
             return -1;
         }
     }
-
     return 0;
 }
 
@@ -246,6 +248,12 @@ struct opentelemetry_context *flb_opentelemetry_context_create(
 
     /* Parse 'add_label' */
     ret = config_add_labels(ins, ctx);
+    if (ret == -1) {
+        return NULL;
+    }
+
+    /* Parse 'label_map_path' */
+    ret = config_label_map_path(ctx);
     if (ret == -1) {
         return NULL;
     }
