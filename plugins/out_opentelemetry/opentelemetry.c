@@ -845,7 +845,8 @@ static void try_get_label_value(struct opentelemetry_context *ctx, msgpack_objec
     }
     for (i = 0; i < body->via.map.size; i++) {
         msgpack_object_kv body_kv = body->via.map.ptr[i];
-        if (strncmp(kv->key.via.str.ptr, body_kv.key.via.str.ptr, kv->key.via.str.size) == 0) {
+        if (kv->key.via.str.size == body_kv.key.via.str.size &&
+                strncmp(kv->key.via.str.ptr, body_kv.key.via.str.ptr, kv->key.via.str.size) == 0) {
             // we are at the leaf node, do not need to descend anymore
             if (kv->val.type == MSGPACK_OBJECT_STR) {
                 if (body_kv.val.type != MSGPACK_OBJECT_STR) {
